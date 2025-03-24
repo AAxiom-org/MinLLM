@@ -1,0 +1,27 @@
+[package]
+name = "minllm"
+version = "0.1.0"
+edition = "2021"
+authors = ["Aidan"]
+description = "MinLLM - A minimalist LLM framework implemented in Rust with Python bindings"
+license = "MIT"
+repository = "https://github.com/username/MinLLM-rs"
+
+[lib]
+name = "minllm"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+pyo3 = { version = "0.19", features = ["extension-module"] }
+async-trait = "0.1"
+tokio = { version = "1", features = ["full"] }
+rayon = "1.7"
+parking_lot = "0.12"
+thiserror = "1.0"
+num_cpus = "1.15"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+futures = "0.3"
+
+[dev-dependencies]
+criterion = "0.5" 
