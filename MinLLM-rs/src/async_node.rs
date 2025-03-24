@@ -1,304 +1,362 @@
-use std::any::Any;
 use std::collections::HashMap;
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
 use async_trait::async_trait;
-use tokio::time;
+use futures::future::{self};
+use tokio::time::sleep;
+use serde_json::Value;
+use log::warn;
 
-use crate::error::{ActionName, MinLLMError, Result};
-use crate::node::{Node, NodeMut, BaseNode, RegularNode, BatchNode, ParamMap};
-use crate::store::SharedStore;
-use crate::flow::AsyncNode;
+use crate::base::{BaseNode, Node as NodeTrait, SharedState, Action};
+use crate::error::{Error, Result};
 
-/// Implementation of an asynchronous node
-pub struct AsyncNodeImpl {
-    base: BaseNode,
-    max_retries: usize,
-    wait: u64,
-    current_retry: usize,
-}
-
-impl Clone for AsyncNodeImpl {
-    fn clone(&self) -> Self {
-        Self {
-            base: self.base.clone(),
-            max_retries: self.max_retries,
-            wait: self.wait,
-            current_retry: 0, // Reset retry count on clone
+/// Trait for asynchronous node operations
+#[async_trait]
+pub trait AsyncNodeTrait: NodeTrait {
+    /// Asynchronous preparation step before execution
+    async fn prep_async(&self, _shared: &mut SharedState) -> Result<Value> {
+        Ok(Value::Null)
+    }
+    
+    /// Asynchronous execution of node logic
+    async fn exec_async(&self, _prep_res: Value) -> Result<Value> {
+        Ok(Value::Null)
+    }
+    
+    /// Asynchronous post-execution step
+    async fn post_async(&self, _shared: &mut SharedState, _prep_res: Value, _exec_res: Value) -> Result<Action> {
+        Ok(None)
+    }
+    
+    /// Asynchronous fallback for execution failures
+    async fn exec_fallback_async(&self, _prep_res: Value, error: Error) -> Result<Value> {
+        Err(error)
+    }
+    
+    /// Internal asynchronous execution method
+    async fn _exec_async(&self, prep_res: Value) -> Result<Value>;
+    
+    /// Run the node asynchronously
+    async fn _run_async(&self, shared: &mut SharedState) -> Result<Action> {
+        let prep_res = self.prep_async(shared).await?;
+        let exec_res = self._exec_async(prep_res.clone()).await?;
+        self.post_async(shared, prep_res, exec_res).await
+    }
+    
+    /// Run the node as a standalone (warns if there are successors)
+    async fn run_async(&self, shared: &mut SharedState) -> Result<Action> {
+        {
+            let successors_lock = self.successors();
+            let successors = successors_lock.read().unwrap();
+            if !successors.is_empty() {
+                warn!("AsyncNode won't run successors. Use AsyncFlow.");
+            }
         }
+        self._run_async(shared).await
     }
 }
 
-impl AsyncNodeImpl {
+/// A node with asynchronous execution
+#[derive(Clone)]
+pub struct AsyncNode {
+    /// Base node implementation
+    base: BaseNode,
+    
+    /// Maximum number of retries
+    max_retries: usize,
+    
+    /// Wait time between retries in milliseconds
+    wait: u64,
+    
+    /// Current retry count
+    cur_retry: Arc<RwLock<usize>>,
+}
+
+impl AsyncNode {
+    /// Create a new async node with retry capability
     pub fn new(max_retries: usize, wait: u64) -> Self {
         Self {
             base: BaseNode::new(),
             max_retries,
             wait,
-            current_retry: 0,
+            cur_retry: Arc::new(RwLock::new(0)),
         }
     }
+}
+
+impl Default for AsyncNode {
+    fn default() -> Self {
+        Self::new(1, 0)
+    }
+}
+
+impl NodeTrait for AsyncNode {
+    fn params(&self) -> Arc<RwLock<HashMap<String, Value>>> {
+        self.base.params()
+    }
     
-    /// Fallback method for when async execution fails after retries
-    pub async fn exec_fallback_async(&self, _prep_result: Box<dyn Any + Send + Sync>, 
-                                   exc: Box<dyn std::error::Error + Send + Sync>) 
-        -> Box<dyn Any + Send + Sync> {
-        // Default implementation just re-raises the exception
-        panic!("Async node execution failed after {} retries: {:?}", self.max_retries, exc);
+    fn successors(&self) -> Arc<RwLock<HashMap<String, Arc<dyn NodeTrait>>>> {
+        self.base.successors()
+    }
+    
+    fn prep(&self, _shared: &mut SharedState) -> Result<Value> {
+        Err(Error::InvalidOperation("Use prep_async".into()))
+    }
+    
+    fn exec(&self, _prep_res: Value) -> Result<Value> {
+        Err(Error::InvalidOperation("Use exec_async".into()))
+    }
+    
+    fn post(&self, _shared: &mut SharedState, _prep_res: Value, _exec_res: Value) -> Result<Action> {
+        Err(Error::InvalidOperation("Use post_async".into()))
+    }
+    
+    fn _run(&self, _shared: &mut SharedState) -> Result<Action> {
+        Err(Error::InvalidOperation("Use run_async".into()))
+    }
+    
+    fn set_params(&self, params: HashMap<String, Value>) {
+        let params_lock = self.params();
+        let mut p = params_lock.write().unwrap();
+        *p = params;
+    }
+    
+    fn add_successor(&self, node: Arc<dyn NodeTrait>, action: &str) -> Result<Arc<dyn NodeTrait>> {
+        let successors_lock = self.successors();
+        let mut successors = successors_lock.write().unwrap();
+        if successors.contains_key(action) {
+            warn!("Overwriting successor for action '{}'", action);
+        }
+        successors.insert(action.to_string(), node.clone());
+        Ok(node)
     }
 }
 
 #[async_trait]
-impl Node for AsyncNodeImpl {
-    fn set_params(&mut self, params: ParamMap) {
-        self.base.set_params(params);
-    }
-    
-    fn get_successor(&self, action: &str) -> Option<&Box<dyn Node>> {
-        self.base.get_successor(action)
-    }
-    
-    fn prep(&self, _shared: &SharedStore) -> Box<dyn Any + Send + Sync> {
-        panic!("Use prep_async instead for AsyncNode");
-    }
-    
-    fn exec(&self, _prep_result: Box<dyn Any + Send + Sync>) -> Box<dyn Any + Send + Sync> {
-        panic!("Use exec_async instead for AsyncNode");
-    }
-    
-    fn post(&self, _shared: &SharedStore, _prep_result: Box<dyn Any + Send + Sync>, 
-           _exec_result: Box<dyn Any + Send + Sync>) -> ActionName {
-        panic!("Use post_async instead for AsyncNode");
-    }
-    
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-}
-
-impl NodeMut for AsyncNodeImpl {
-    fn add_successor(&mut self, node: Box<dyn Node>, action: impl Into<ActionName>) -> &mut Self {
-        self.base.add_successor(node, action);
-        self
-    }
-}
-
-#[async_trait]
-impl AsyncNode for AsyncNodeImpl {
-    async fn prep_async(&self, _shared: &SharedStore) -> Box<dyn Any + Send + Sync> {
-        Box::new(())
-    }
-    
-    async fn exec_async(&self, _prep_result: Box<dyn Any + Send + Sync>) -> Box<dyn Any + Send + Sync> {
-        Box::new(())
-    }
-    
-    async fn post_async(&self, _shared: &SharedStore, _prep_result: Box<dyn Any + Send + Sync>,
-                      _exec_result: Box<dyn Any + Send + Sync>) -> ActionName {
-        ActionName::default()
-    }
-    
-    async fn run_async(&self, shared: &SharedStore) -> ActionName {
-        if !self.base.successors.is_empty() {
-            eprintln!("Warning: Node won't run successors. Use AsyncFlow.");
-        }
-        
-        let prep_result = self.prep_async(shared).await;
-        let mut retry_count = 0;
-        let mut prep_result = prep_result;
-        
-        loop {
-            match tokio::task::spawn_blocking(move || {
-                // This would be a future that can fail in a real implementation
-                // For now, we just return successful execution
-                Ok::<_, Box<dyn std::error::Error + Send + Sync>>(prep_result)
-            }).await.unwrap() {
-                Ok(result) => {
-                    let exec_result = self.exec_async(result).await;
-                    return self.post_async(shared, result, exec_result).await;
-                },
-                Err(err) => {
-                    retry_count += 1;
-                    if retry_count >= self.max_retries {
-                        let exec_result = self.exec_fallback_async(prep_result, err).await;
-                        return self.post_async(shared, prep_result, exec_result).await;
+impl AsyncNodeTrait for AsyncNode {
+    async fn _exec_async(&self, prep_res: Value) -> Result<Value> {
+        for retry in 0..self.max_retries {
+            {
+                let mut cur_retry = self.cur_retry.write().unwrap();
+                *cur_retry = retry;
+            }
+            
+            match self.exec_async(prep_res.clone()).await {
+                Ok(res) => return Ok(res),
+                Err(e) => {
+                    if retry == self.max_retries - 1 {
+                        return self.exec_fallback_async(prep_res, e).await;
                     }
                     
                     if self.wait > 0 {
-                        time::sleep(Duration::from_millis(self.wait)).await;
+                        sleep(Duration::from_millis(self.wait)).await;
                     }
-                    
-                    // Create a fresh copy for the next try
-                    prep_result = Box::new(());
                 }
             }
         }
+        
+        // This should never happen if max_retries > 0
+        Err(Error::NodeExecution("Max retries exceeded".into()))
     }
 }
 
-/// AsyncBatchNode processes batches of items asynchronously
+/// An async node that processes batches of items
+#[derive(Clone)]
 pub struct AsyncBatchNode {
-    async_node: AsyncNodeImpl,
-}
-
-impl Clone for AsyncBatchNode {
-    fn clone(&self) -> Self {
-        Self {
-            async_node: self.async_node.clone(),
-        }
-    }
+    /// Underlying async node
+    node: AsyncNode,
 }
 
 impl AsyncBatchNode {
+    /// Create a new async batch node
     pub fn new(max_retries: usize, wait: u64) -> Self {
         Self {
-            async_node: AsyncNodeImpl::new(max_retries, wait),
+            node: AsyncNode::new(max_retries, wait),
         }
     }
 }
 
-#[async_trait]
-impl Node for AsyncBatchNode {
-    fn set_params(&mut self, params: ParamMap) {
-        self.async_node.set_params(params);
-    }
-    
-    fn get_successor(&self, action: &str) -> Option<&Box<dyn Node>> {
-        self.async_node.get_successor(action)
-    }
-    
-    fn prep(&self, _shared: &SharedStore) -> Box<dyn Any + Send + Sync> {
-        panic!("Use prep_async instead for AsyncBatchNode");
-    }
-    
-    fn exec(&self, _prep_result: Box<dyn Any + Send + Sync>) -> Box<dyn Any + Send + Sync> {
-        panic!("Use exec_async instead for AsyncBatchNode");
-    }
-    
-    fn post(&self, _shared: &SharedStore, _prep_result: Box<dyn Any + Send + Sync>, 
-           _exec_result: Box<dyn Any + Send + Sync>) -> ActionName {
-        panic!("Use post_async instead for AsyncBatchNode");
-    }
-    
-    fn as_any(&self) -> &dyn Any {
-        self
+impl Default for AsyncBatchNode {
+    fn default() -> Self {
+        Self::new(1, 0)
     }
 }
 
-impl NodeMut for AsyncBatchNode {
-    fn add_successor(&mut self, node: Box<dyn Node>, action: impl Into<ActionName>) -> &mut Self {
-        self.async_node.add_successor(node, action);
-        self
+impl NodeTrait for AsyncBatchNode {
+    fn params(&self) -> Arc<RwLock<HashMap<String, Value>>> {
+        self.node.params()
+    }
+    
+    fn successors(&self) -> Arc<RwLock<HashMap<String, Arc<dyn NodeTrait>>>> {
+        self.node.successors()
+    }
+    
+    fn prep(&self, _shared: &mut SharedState) -> Result<Value> {
+        Err(Error::InvalidOperation("Use prep_async".into()))
+    }
+    
+    fn exec(&self, _prep_res: Value) -> Result<Value> {
+        Err(Error::InvalidOperation("Use exec_async".into()))
+    }
+    
+    fn post(&self, _shared: &mut SharedState, _prep_res: Value, _exec_res: Value) -> Result<Action> {
+        Err(Error::InvalidOperation("Use post_async".into()))
+    }
+    
+    fn _run(&self, _shared: &mut SharedState) -> Result<Action> {
+        Err(Error::InvalidOperation("Use run_async".into()))
+    }
+    
+    fn set_params(&self, params: HashMap<String, Value>) {
+        self.node.set_params(params);
+    }
+    
+    fn add_successor(&self, node: Arc<dyn NodeTrait>, action: &str) -> Result<Arc<dyn NodeTrait>> {
+        self.node.add_successor(node, action)
     }
 }
 
 #[async_trait]
-impl AsyncNode for AsyncBatchNode {
-    async fn prep_async(&self, shared: &SharedStore) -> Box<dyn Any + Send + Sync> {
-        self.async_node.prep_async(shared).await
+impl AsyncNodeTrait for AsyncBatchNode {
+    async fn prep_async(&self, shared: &mut SharedState) -> Result<Value> {
+        self.node.prep_async(shared).await
     }
     
-    async fn exec_async(&self, prep_result: Box<dyn Any + Send + Sync>) -> Box<dyn Any + Send + Sync> {
-        self.async_node.exec_async(prep_result).await
+    async fn exec_async(&self, prep_res: Value) -> Result<Value> {
+        self.node.exec_async(prep_res).await
     }
     
-    async fn post_async(&self, shared: &SharedStore, prep_result: Box<dyn Any + Send + Sync>,
-                      exec_result: Box<dyn Any + Send + Sync>) -> ActionName {
-        self.async_node.post_async(shared, prep_result, exec_result).await
+    async fn post_async(&self, shared: &mut SharedState, prep_res: Value, exec_res: Value) -> Result<Action> {
+        self.node.post_async(shared, prep_res, exec_res).await
     }
     
-    async fn run_async(&self, shared: &SharedStore) -> ActionName {
-        if !self.async_node.base.successors.is_empty() {
-            eprintln!("Warning: Node won't run successors. Use AsyncFlow.");
+    async fn exec_fallback_async(&self, prep_res: Value, error: Error) -> Result<Value> {
+        self.node.exec_fallback_async(prep_res, error).await
+    }
+    
+    async fn _exec_async(&self, items: Value) -> Result<Value> {
+        // Handle empty batches
+        if items.is_null() {
+            return Ok(Value::Array(vec![]));
         }
         
-        let prep_result = self.prep_async(shared).await;
+        // Ensure we have an array
+        let items = match items {
+            Value::Array(items) => items,
+            _ => return Err(Error::NodeExecution("AsyncBatchNode requires an array".into())),
+        };
         
-        // Process batch items - actual implementation would need special handling
-        // This is a simplified version
-        AsyncNode::run_async(&self.async_node, shared).await
+        // Process each item sequentially
+        let mut results = Vec::with_capacity(items.len());
+        for item in items {
+            let result = self.node._exec_async(item).await?;
+            results.push(result);
+        }
+        
+        Ok(Value::Array(results))
     }
 }
 
-/// AsyncParallelBatchNode processes batches of items asynchronously in parallel
+/// An async node that processes batches of items in parallel
+#[derive(Clone)]
 pub struct AsyncParallelBatchNode {
-    async_node: AsyncNodeImpl,
-}
-
-impl Clone for AsyncParallelBatchNode {
-    fn clone(&self) -> Self {
-        Self {
-            async_node: self.async_node.clone(),
-        }
-    }
+    /// Underlying async node
+    node: AsyncNode,
 }
 
 impl AsyncParallelBatchNode {
+    /// Create a new async parallel batch node
     pub fn new(max_retries: usize, wait: u64) -> Self {
         Self {
-            async_node: AsyncNodeImpl::new(max_retries, wait),
+            node: AsyncNode::new(max_retries, wait),
         }
     }
 }
 
-#[async_trait]
-impl Node for AsyncParallelBatchNode {
-    fn set_params(&mut self, params: ParamMap) {
-        self.async_node.set_params(params);
-    }
-    
-    fn get_successor(&self, action: &str) -> Option<&Box<dyn Node>> {
-        self.async_node.get_successor(action)
-    }
-    
-    fn prep(&self, _shared: &SharedStore) -> Box<dyn Any + Send + Sync> {
-        panic!("Use prep_async instead for AsyncParallelBatchNode");
-    }
-    
-    fn exec(&self, _prep_result: Box<dyn Any + Send + Sync>) -> Box<dyn Any + Send + Sync> {
-        panic!("Use exec_async instead for AsyncParallelBatchNode");
-    }
-    
-    fn post(&self, _shared: &SharedStore, _prep_result: Box<dyn Any + Send + Sync>, 
-           _exec_result: Box<dyn Any + Send + Sync>) -> ActionName {
-        panic!("Use post_async instead for AsyncParallelBatchNode");
-    }
-    
-    fn as_any(&self) -> &dyn Any {
-        self
+impl Default for AsyncParallelBatchNode {
+    fn default() -> Self {
+        Self::new(1, 0)
     }
 }
 
-impl NodeMut for AsyncParallelBatchNode {
-    fn add_successor(&mut self, node: Box<dyn Node>, action: impl Into<ActionName>) -> &mut Self {
-        self.async_node.add_successor(node, action);
-        self
+impl NodeTrait for AsyncParallelBatchNode {
+    fn params(&self) -> Arc<RwLock<HashMap<String, Value>>> {
+        self.node.params()
+    }
+    
+    fn successors(&self) -> Arc<RwLock<HashMap<String, Arc<dyn NodeTrait>>>> {
+        self.node.successors()
+    }
+    
+    fn prep(&self, _shared: &mut SharedState) -> Result<Value> {
+        Err(Error::InvalidOperation("Use prep_async".into()))
+    }
+    
+    fn exec(&self, _prep_res: Value) -> Result<Value> {
+        Err(Error::InvalidOperation("Use exec_async".into()))
+    }
+    
+    fn post(&self, _shared: &mut SharedState, _prep_res: Value, _exec_res: Value) -> Result<Action> {
+        Err(Error::InvalidOperation("Use post_async".into()))
+    }
+    
+    fn _run(&self, _shared: &mut SharedState) -> Result<Action> {
+        Err(Error::InvalidOperation("Use run_async".into()))
+    }
+    
+    fn set_params(&self, params: HashMap<String, Value>) {
+        self.node.set_params(params);
+    }
+    
+    fn add_successor(&self, node: Arc<dyn NodeTrait>, action: &str) -> Result<Arc<dyn NodeTrait>> {
+        self.node.add_successor(node, action)
     }
 }
 
 #[async_trait]
-impl AsyncNode for AsyncParallelBatchNode {
-    async fn prep_async(&self, shared: &SharedStore) -> Box<dyn Any + Send + Sync> {
-        self.async_node.prep_async(shared).await
+impl AsyncNodeTrait for AsyncParallelBatchNode {
+    async fn prep_async(&self, shared: &mut SharedState) -> Result<Value> {
+        self.node.prep_async(shared).await
     }
     
-    async fn exec_async(&self, prep_result: Box<dyn Any + Send + Sync>) -> Box<dyn Any + Send + Sync> {
-        self.async_node.exec_async(prep_result).await
+    async fn exec_async(&self, prep_res: Value) -> Result<Value> {
+        self.node.exec_async(prep_res).await
     }
     
-    async fn post_async(&self, shared: &SharedStore, prep_result: Box<dyn Any + Send + Sync>,
-                      exec_result: Box<dyn Any + Send + Sync>) -> ActionName {
-        self.async_node.post_async(shared, prep_result, exec_result).await
+    async fn post_async(&self, shared: &mut SharedState, prep_res: Value, exec_res: Value) -> Result<Action> {
+        self.node.post_async(shared, prep_res, exec_res).await
     }
     
-    async fn run_async(&self, shared: &SharedStore) -> ActionName {
-        if !self.async_node.base.successors.is_empty() {
-            eprintln!("Warning: Node won't run successors. Use AsyncFlow.");
+    async fn exec_fallback_async(&self, prep_res: Value, error: Error) -> Result<Value> {
+        self.node.exec_fallback_async(prep_res, error).await
+    }
+    
+    async fn _exec_async(&self, items: Value) -> Result<Value> {
+        // Handle empty batches
+        if items.is_null() {
+            return Ok(Value::Array(vec![]));
         }
         
-        let prep_result = self.prep_async(shared).await;
+        // Ensure we have an array
+        let items = match items {
+            Value::Array(items) => items,
+            _ => return Err(Error::NodeExecution("AsyncParallelBatchNode requires an array".into())),
+        };
         
-        // Process batch items in parallel - simplified implementation
-        // In actual code, we would use futures::join_all
-        AsyncNode::run_async(&self.async_node, shared).await
+        // Process all items in parallel
+        let futures = items
+            .into_iter()
+            .map(|item| {
+                let node = self.node.clone();
+                async move { node._exec_async(item).await }
+            })
+            .collect::<Vec<_>>();
+        
+        let results = future::join_all(futures)
+            .await
+            .into_iter()
+            .collect::<Result<Vec<_>>>()?;
+        
+        Ok(Value::Array(results))
     }
 } 

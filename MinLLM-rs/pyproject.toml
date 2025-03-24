@@ -1,13 +1,12 @@
 [build-system]
-requires = ["maturin>=1.0,<2.0"]
+requires = ["maturin>=1.3,<2.0"]
 build-backend = "maturin"
 
 [project]
 name = "minllm"
-version = "0.1.0"
-description = "MinLLM - A minimalist LLM framework implemented in Rust"
+description = "A workflow orchestration library for Python, implemented in Rust"
 authors = [
-    {name = "Aidan", email = "example@example.com"},
+    {name = "MinLLM Authors", email = "example@example.com"}
 ]
 requires-python = ">=3.8"
 classifiers = [
@@ -17,8 +16,13 @@ classifiers = [
     "Programming Language :: Python :: 3.9",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
 ]
 
 [tool.maturin]
+features = ["python"]
 python-source = "python"
-features = ["pyo3/extension-module"] 
+module-name = "minllm._minllm"
+
+[project.optional-dependencies]
+dev = ["pytest>=6.0.0", "pytest-asyncio"] 

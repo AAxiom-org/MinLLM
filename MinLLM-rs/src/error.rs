@@ -1,55 +1,31 @@
 use thiserror::Error;
-use std::fmt;
+
+pub type Result<T> = std::result::Result<T, Error>;
 
 #[derive(Error, Debug)]
-pub enum MinLLMError {
-    #[error("Flow execution error: {0}")]
-    FlowError(String),
-    
+pub enum Error {
     #[error("Node execution error: {0}")]
-    NodeError(String),
+    NodeExecution(String),
     
-    #[error("Store access error: {0}")]
-    StoreError(String),
+    #[error("Flow execution error: {0}")]
+    FlowExecution(String),
     
-    #[error("Python conversion error: {0}")]
-    PyConversionError(String),
+    #[error("Invalid action: {0}")]
+    InvalidAction(String),
+    
+    #[error("Missing successor for action: {0}")]
+    MissingSuccessor(String),
+    
+    #[error("Invalid operation: {0}")]
+    InvalidOperation(String),
+    
+    #[cfg(feature = "python")]
+    #[error("Python error: {0}")]
+    Python(#[from] pyo3::PyErr),
+    
+    #[error("Async runtime error: {0}")]
+    AsyncRuntime(#[from] tokio::task::JoinError),
     
     #[error("Unknown error: {0}")]
     Unknown(String),
-}
-
-pub type Result<T> = std::result::Result<T, MinLLMError>;
-
-// Common result type for node execution
-pub struct ActionName(pub String);
-
-impl Default for ActionName {
-    fn default() -> Self {
-        ActionName("default".to_string())
-    }
-}
-
-impl From<&str> for ActionName {
-    fn from(s: &str) -> Self {
-        ActionName(s.to_string())
-    }
-}
-
-impl From<String> for ActionName {
-    fn from(s: String) -> Self {
-        ActionName(s)
-    }
-}
-
-impl fmt::Display for ActionName {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.0)
-    }
-}
-
-impl AsRef<str> for ActionName {
-    fn as_ref(&self) -> &str {
-        &self.0
-    }
 } 

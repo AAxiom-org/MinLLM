@@ -253,3 +253,75 @@ Project Link: [https://github.com/orgs/AAxiom-org/projects/2](https://github.com
 [Bootstrap-url]: https://getbootstrap.com
 [JQuery.com]: https://img.shields.io/badge/jQuery-0769AD?style=for-the-badge&logo=jquery&logoColor=white
 [JQuery-url]: https://jquery.com 
+
+# MinLLM
+
+A workflow orchestration library implemented in Rust with Python bindings.
+
+## Overview
+
+MinLLM is a rewrite of a Python workflow orchestration library in Rust, with Python bindings to make it usable from Python. It provides tools for building and executing workflow pipelines with both synchronous and asynchronous execution patterns.
+
+## Features
+
+- Build workflow pipelines using composable nodes
+- Synchronous and asynchronous execution
+- Batch processing
+- Parallel execution for batch operations
+- Error handling with retry logic
+- Conditional transitions between nodes
+- Improved performance due to Rust implementation
+
+## Installation
+
+### Using pip (Python)
+
+```bash
+pip install minllm
+```
+
+### As a Rust crate
+
+```bash
+cargo add minllm
+```
+
+## Directory Structure
+
+- `/minllm` - Main Rust crate with Python bindings
+  - `/src` - Rust source code
+  - `/python` - Python package wrapper
+  - `/examples` - Example usage
+
+## Building from Source
+
+1. Clone the repository:
+```bash
+git clone https://github.com/yourusername/minllm
+cd minllm
+```
+
+2. Build the Rust library:
+```bash
+cd minllm
+cargo build --release
+```
+
+3. Build the Python package:
+```bash
+pip install maturin
+maturin build --release
+```
+
+4. Install the Python package:
+```bash
+pip install target/wheels/minllm-*.whl
+```
+
+## Usage Examples
+
+See the [MinLLM README](minllm/README.md) for detailed usage examples.
+
+## License
+
+MIT License 

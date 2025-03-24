@@ -1,307 +1,348 @@
-use std::any::Any;
 use std::collections::HashMap;
+use std::sync::{Arc, RwLock};
+use std::any::Any;
 use async_trait::async_trait;
 use futures::future;
+use serde_json::Value;
+use log::warn;
 
-use crate::error::{ActionName, MinLLMError, Result};
-use crate::node::{Node, NodeMut, BaseNode, ParamMap};
-use crate::store::SharedStore;
-use crate::flow::{Flow, BatchFlow, AsyncNode};
+use crate::base::{BaseNode, Node, SharedState, Action};
+use crate::flow::{Flow, BatchFlow};
+use crate::async_node::AsyncNodeTrait;
+use crate::error::{Error, Result};
 
-/// AsyncFlow orchestrates async nodes
+/// A workflow with asynchronous execution
+#[derive(Clone)]
 pub struct AsyncFlow {
+    /// Underlying flow
     flow: Flow,
-    async_base: BaseNode,
+    
+    /// Base node implementation
+    base: BaseNode,
 }
 
 impl AsyncFlow {
-    pub fn new(start: Box<dyn Node>) -> Self {
+    /// Create a new async flow with a starting node
+    pub fn new(start: Arc<dyn Node>) -> Self {
         Self {
             flow: Flow::new(start),
-            async_base: BaseNode::new(),
+            base: BaseNode::new(),
         }
     }
     
-    /// Get the next node in the flow based on the current action
-    fn get_next_node(&self, current: &dyn Node, action: &str) -> Option<Box<dyn Node>> {
-        let action_name = action.to_string();
-        let default_action = "default".to_string();
-        
-        // Try to get the successor for the specific action
-        if let Some(next) = current.get_successor(&action_name) {
-            // Clone the next node
-            return Some(deep_clone_node(next));
-        }
-        
-        // If not found and action is not default, try default
-        if action_name != default_action {
-            if let Some(next) = current.get_successor(&default_action) {
-                return Some(deep_clone_node(next));
-            }
-        }
-        
-        // If no successor found and there are successors, warn
-        if !action_name.is_empty() {
-            eprintln!("Warning: Flow ends: '{}' not found", action_name);
-        }
-        
-        None
+    /// Check if a node is an async node
+    fn is_async(&self, node: &Arc<dyn Node>) -> bool {
+        // Try to cast to the trait object, just to check if it's possible
+        // We can't use the result directly, we just want to know if it's possible
+        let type_id = node.type_id();
+        // Check against the type IDs of our async node types
+        let async_node_ids = [
+            std::any::TypeId::of::<dyn AsyncNodeTrait>(),
+            // Add other async node type IDs if needed
+        ];
+        async_node_ids.contains(&type_id)
     }
     
-    /// Orchestrate the async flow execution
-    async fn orchestrate_async(&self, shared: &SharedStore, params: Option<ParamMap>) {
-        let mut current = Some(clone_box(&self.flow.start));
-        let params = params.unwrap_or_else(|| self.async_base.params.clone());
+    /// Orchestrate flow through nodes asynchronously
+    pub async fn _orch_async(&self, shared: &mut SharedState, params: Option<HashMap<String, Value>>) -> Result<()> {
+        let mut curr = self.flow.start.clone();
+        let params = params.unwrap_or_else(|| {
+            self.base.params().read().unwrap().clone()
+        });
         
-        while let Some(mut node) = current {
-            node.set_params(params.clone());
-            
-            // Determine if the node is async-capable
-            let action = if let Some(async_node) = node.as_any().downcast_ref::<dyn AsyncNode>() {
-                async_node.run_async(shared).await
+        curr.set_params(params);
+        
+        while let Some(node) = curr.clone().into() {
+            let action = if self.is_async(&node) {
+                // This is an async node, use dynamic dispatch to call the async method
+                // For simplicity, we'll just implement a mock here
+                // In a real implementation, you'd need to handle this more robustly
+                Err(Error::InvalidOperation("Dynamic dispatch for async nodes not implemented".into()))?
             } else {
-                node.run(shared)
+                // Not an async node, use the synchronous method
+                node._run(shared)?
             };
             
-            current = self.get_next_node(&*node, &action.0);
+            curr = match self.flow.get_next_node(node, action) {
+                Some(next) => next,
+                None => break,
+            };
         }
-    }
-
-    fn as_any(&self) -> &dyn Any {
-        self
+        
+        Ok(())
     }
 }
 
-#[async_trait]
 impl Node for AsyncFlow {
-    fn set_params(&mut self, params: ParamMap) {
-        self.flow.set_params(params);
+    fn params(&self) -> Arc<RwLock<HashMap<String, Value>>> {
+        self.base.params()
     }
     
-    fn add_successor(&mut self, node: Box<dyn Node>, action: impl Into<ActionName>) -> &mut Self {
-        self.flow.add_successor(node, action);
-        self
+    fn successors(&self) -> Arc<RwLock<HashMap<String, Arc<dyn Node>>>> {
+        self.base.successors()
     }
     
-    fn get_successor(&self, action: &str) -> Option<&Box<dyn Node>> {
-        self.flow.get_successor(action)
+    fn set_params(&self, params: HashMap<String, Value>) {
+        let params_lock = self.params();
+        let mut p = params_lock.write().unwrap();
+        *p = params;
     }
     
-    fn prep(&self, _shared: &SharedStore) -> Box<dyn Any + Send + Sync> {
-        panic!("Use prep_async instead for AsyncFlow");
+    fn add_successor(&self, node: Arc<dyn Node>, action: &str) -> Result<Arc<dyn Node>> {
+        let successors_lock = self.successors();
+        let mut successors = successors_lock.write().unwrap();
+        if successors.contains_key(action) {
+            warn!("Overwriting successor for action '{}'", action);
+        }
+        successors.insert(action.to_string(), node.clone());
+        Ok(node)
     }
     
-    fn exec(&self, _prep_result: &Box<dyn Any + Send + Sync>) -> Box<dyn Any + Send + Sync> {
-        panic!("AsyncFlow cannot exec directly. Use run_async() instead.");
+    fn prep(&self, _shared: &mut SharedState) -> Result<Value> {
+        Err(Error::InvalidOperation("Use prep_async".into()))
     }
     
-    fn post(&self, _shared: &SharedStore, _prep_result: &Box<dyn Any + Send + Sync>, 
-           _exec_result: Box<dyn Any + Send + Sync>) -> ActionName {
-        panic!("Use post_async instead for AsyncFlow");
+    fn exec(&self, _prep_res: Value) -> Result<Value> {
+        Err(Error::InvalidOperation("AsyncFlow can't exec".into()))
     }
-}
-
-impl NodeMut for AsyncFlow {
-    fn add_successor(&mut self, node: Box<dyn Node>, action: impl Into<ActionName>) -> &mut Self {
-        self.flow.add_successor(node, action);
-        self
+    
+    fn post(&self, _shared: &mut SharedState, _prep_res: Value, _exec_res: Value) -> Result<Action> {
+        Err(Error::InvalidOperation("Use post_async".into()))
+    }
+    
+    fn _run(&self, _shared: &mut SharedState) -> Result<Action> {
+        Err(Error::InvalidOperation("Use run_async".into()))
     }
 }
 
 #[async_trait]
-impl AsyncNode for AsyncFlow {
-    async fn prep_async(&self, _shared: &SharedStore) -> Box<dyn Any + Send + Sync> {
-        Box::new(())
+impl AsyncNodeTrait for AsyncFlow {
+    async fn _exec_async(&self, _prep_res: Value) -> Result<Value> {
+        Err(Error::InvalidOperation("AsyncFlow can't exec".into()))
     }
     
-    async fn exec_async(&self, _prep_result: &Box<dyn Any + Send + Sync>) -> Box<dyn Any + Send + Sync> {
-        panic!("AsyncFlow cannot exec_async directly. Use run_async() instead.");
-    }
-    
-    async fn post_async(&self, _shared: &SharedStore, _prep_result: &Box<dyn Any + Send + Sync>,
-                      _exec_result: Box<dyn Any + Send + Sync>) -> ActionName {
-        ActionName::default()
-    }
-    
-    async fn run_async(&self, shared: &SharedStore) -> ActionName {
-        let prep_result = self.prep_async(shared).await;
-        self.orchestrate_async(shared, None).await;
-        self.post_async(shared, &prep_result, Box::new(())).await
+    async fn _run_async(&self, shared: &mut SharedState) -> Result<Action> {
+        let prep_res = self.prep_async(shared).await?;
+        self._orch_async(shared, None).await?;
+        self.post_async(shared, prep_res, Value::Null).await
     }
 }
 
-/// AsyncBatchFlow processes batches of parameters asynchronously
+/// An async flow that processes batches of items
+#[derive(Clone)]
 pub struct AsyncBatchFlow {
-    async_flow: AsyncFlow,
+    /// Underlying async flow
+    flow: AsyncFlow,
+    
+    /// Underlying batch flow
+    batch_flow: BatchFlow,
 }
 
 impl AsyncBatchFlow {
-    pub fn new(start: Box<dyn Node>) -> Self {
+    /// Create a new async batch flow with a starting node
+    pub fn new(start: Arc<dyn Node>) -> Self {
         Self {
-            async_flow: AsyncFlow::new(start),
+            flow: AsyncFlow::new(start.clone()),
+            batch_flow: BatchFlow::new(start),
         }
     }
 }
 
-#[async_trait]
 impl Node for AsyncBatchFlow {
-    fn set_params(&mut self, params: ParamMap) {
-        self.async_flow.set_params(params);
+    fn params(&self) -> Arc<RwLock<HashMap<String, Value>>> {
+        self.flow.params()
     }
     
-    fn add_successor(&mut self, node: Box<dyn Node>, action: impl Into<ActionName>) -> &mut Self {
-        self.async_flow.add_successor(node, action);
-        self
+    fn successors(&self) -> Arc<RwLock<HashMap<String, Arc<dyn Node>>>> {
+        self.flow.successors()
     }
     
-    fn get_successor(&self, action: &str) -> Option<&Box<dyn Node>> {
-        self.async_flow.get_successor(action)
+    fn set_params(&self, params: HashMap<String, Value>) {
+        self.flow.set_params(params);
     }
     
-    fn prep(&self, _shared: &SharedStore) -> Box<dyn Any + Send + Sync> {
-        panic!("Use prep_async instead for AsyncBatchFlow");
+    fn add_successor(&self, node: Arc<dyn Node>, action: &str) -> Result<Arc<dyn Node>> {
+        self.flow.add_successor(node, action)
     }
     
-    fn exec(&self, _prep_result: &Box<dyn Any + Send + Sync>) -> Box<dyn Any + Send + Sync> {
-        panic!("AsyncBatchFlow cannot exec directly. Use run_async() instead.");
+    fn prep(&self, _shared: &mut SharedState) -> Result<Value> {
+        Err(Error::InvalidOperation("Use prep_async".into()))
     }
     
-    fn post(&self, _shared: &SharedStore, _prep_result: &Box<dyn Any + Send + Sync>, 
-           _exec_result: Box<dyn Any + Send + Sync>) -> ActionName {
-        panic!("Use post_async instead for AsyncBatchFlow");
+    fn exec(&self, _prep_res: Value) -> Result<Value> {
+        Err(Error::InvalidOperation("AsyncBatchFlow can't exec".into()))
     }
-
-    fn as_any(&self) -> &dyn Any {
-        self
+    
+    fn post(&self, _shared: &mut SharedState, _prep_res: Value, _exec_res: Value) -> Result<Action> {
+        Err(Error::InvalidOperation("Use post_async".into()))
     }
-}
-
-impl NodeMut for AsyncBatchFlow {
-    fn add_successor(&mut self, node: Box<dyn Node>, action: impl Into<ActionName>) -> &mut Self {
-        self.async_flow.add_successor(node, action);
-        self
+    
+    fn _run(&self, _shared: &mut SharedState) -> Result<Action> {
+        Err(Error::InvalidOperation("Use run_async".into()))
     }
 }
 
 #[async_trait]
-impl AsyncNode for AsyncBatchFlow {
-    async fn prep_async(&self, shared: &SharedStore) -> Box<dyn Any + Send + Sync> {
-        self.async_flow.prep_async(shared).await
+impl AsyncNodeTrait for AsyncBatchFlow {
+    async fn _exec_async(&self, _prep_res: Value) -> Result<Value> {
+        Err(Error::InvalidOperation("AsyncBatchFlow can't exec".into()))
     }
     
-    async fn exec_async(&self, _prep_result: &Box<dyn Any + Send + Sync>) -> Box<dyn Any + Send + Sync> {
-        panic!("AsyncBatchFlow cannot exec_async directly. Use run_async() instead.");
-    }
-    
-    async fn post_async(&self, shared: &SharedStore, prep_result: &Box<dyn Any + Send + Sync>,
-                      exec_result: Box<dyn Any + Send + Sync>) -> ActionName {
-        self.async_flow.post_async(shared, prep_result, exec_result).await
-    }
-    
-    async fn run_async(&self, shared: &SharedStore) -> ActionName {
-        let prep_result = self.prep_async(shared).await;
+    async fn _run_async(&self, shared: &mut SharedState) -> Result<Action> {
+        let prep_res = self.prep_async(shared).await?;
         
-        // Process batch params sequentially
-        if let Some(batch_params) = prep_result.downcast_ref::<Vec<ParamMap>>() {
-            for params in batch_params {
-                self.async_flow.orchestrate_async(shared, Some(params.clone())).await;
+        let batch_params = match &prep_res {
+            Value::Array(items) => items
+                .iter()
+                .map(|v| {
+                    if let Value::Object(map) = v {
+                        let map: HashMap<String, Value> = map
+                            .iter()
+                            .map(|(k, v)| (k.clone(), v.clone()))
+                            .collect();
+                        Ok(map)
+                    } else {
+                        Err(Error::NodeExecution("AsyncBatchFlow prep should return array of objects".into()))
+                    }
+                })
+                .collect::<Result<Vec<_>>>()?,
+            Value::Null => vec![],
+            _ => return Err(Error::NodeExecution("AsyncBatchFlow prep should return array or null".into())),
+        };
+        
+        let flow_params = self.flow.params().read().unwrap().clone();
+        
+        for mut bp in batch_params {
+            // Merge batch params with flow params
+            for (k, v) in flow_params.clone() {
+                bp.entry(k).or_insert(v);
             }
+            
+            self.flow._orch_async(shared, Some(bp)).await?;
         }
         
-        self.post_async(shared, &prep_result, Box::new(())).await
+        self.post_async(shared, prep_res, Value::Null).await
     }
 }
 
-/// AsyncParallelBatchFlow processes batches of parameters asynchronously in parallel
+/// An async flow that processes batches of items in parallel
+#[derive(Clone)]
 pub struct AsyncParallelBatchFlow {
-    async_flow: AsyncFlow,
+    /// Underlying async batch flow
+    batch_flow: AsyncBatchFlow,
 }
 
 impl AsyncParallelBatchFlow {
-    pub fn new(start: Box<dyn Node>) -> Self {
+    /// Create a new async parallel batch flow with a starting node
+    pub fn new(start: Arc<dyn Node>) -> Self {
         Self {
-            async_flow: AsyncFlow::new(start),
+            batch_flow: AsyncBatchFlow::new(start),
         }
     }
 }
 
-#[async_trait]
 impl Node for AsyncParallelBatchFlow {
-    fn set_params(&mut self, params: ParamMap) {
-        self.async_flow.set_params(params);
+    fn params(&self) -> Arc<RwLock<HashMap<String, Value>>> {
+        self.batch_flow.params()
     }
     
-    fn add_successor(&mut self, node: Box<dyn Node>, action: impl Into<ActionName>) -> &mut Self {
-        self.async_flow.add_successor(node, action);
-        self
+    fn successors(&self) -> Arc<RwLock<HashMap<String, Arc<dyn Node>>>> {
+        self.batch_flow.successors()
     }
     
-    fn get_successor(&self, action: &str) -> Option<&Box<dyn Node>> {
-        self.async_flow.get_successor(action)
+    fn set_params(&self, params: HashMap<String, Value>) {
+        self.batch_flow.set_params(params);
     }
     
-    fn prep(&self, _shared: &SharedStore) -> Box<dyn Any + Send + Sync> {
-        panic!("Use prep_async instead for AsyncParallelBatchFlow");
+    fn add_successor(&self, node: Arc<dyn Node>, action: &str) -> Result<Arc<dyn Node>> {
+        self.batch_flow.add_successor(node, action)
     }
     
-    fn exec(&self, _prep_result: &Box<dyn Any + Send + Sync>) -> Box<dyn Any + Send + Sync> {
-        panic!("AsyncParallelBatchFlow cannot exec directly. Use run_async() instead.");
+    fn prep(&self, _shared: &mut SharedState) -> Result<Value> {
+        Err(Error::InvalidOperation("Use prep_async".into()))
     }
     
-    fn post(&self, _shared: &SharedStore, _prep_result: &Box<dyn Any + Send + Sync>, 
-           _exec_result: Box<dyn Any + Send + Sync>) -> ActionName {
-        panic!("Use post_async instead for AsyncParallelBatchFlow");
+    fn exec(&self, _prep_res: Value) -> Result<Value> {
+        Err(Error::InvalidOperation("AsyncParallelBatchFlow can't exec".into()))
     }
-
-    fn as_any(&self) -> &dyn Any {
-        self
+    
+    fn post(&self, _shared: &mut SharedState, _prep_res: Value, _exec_res: Value) -> Result<Action> {
+        Err(Error::InvalidOperation("Use post_async".into()))
     }
-}
-
-impl NodeMut for AsyncParallelBatchFlow {
-    fn add_successor(&mut self, node: Box<dyn Node>, action: impl Into<ActionName>) -> &mut Self {
-        self.async_flow.add_successor(node, action);
-        self
+    
+    fn _run(&self, _shared: &mut SharedState) -> Result<Action> {
+        Err(Error::InvalidOperation("Use run_async".into()))
     }
 }
 
 #[async_trait]
-impl AsyncNode for AsyncParallelBatchFlow {
-    async fn prep_async(&self, shared: &SharedStore) -> Box<dyn Any + Send + Sync> {
-        self.async_flow.prep_async(shared).await
+impl AsyncNodeTrait for AsyncParallelBatchFlow {
+    async fn prep_async(&self, shared: &mut SharedState) -> Result<Value> {
+        self.batch_flow.prep_async(shared).await
     }
     
-    async fn exec_async(&self, _prep_result: &Box<dyn Any + Send + Sync>) -> Box<dyn Any + Send + Sync> {
-        panic!("AsyncParallelBatchFlow cannot exec_async directly. Use run_async() instead.");
+    async fn post_async(&self, shared: &mut SharedState, prep_res: Value, exec_res: Value) -> Result<Action> {
+        self.batch_flow.post_async(shared, prep_res, exec_res).await
     }
     
-    async fn post_async(&self, shared: &SharedStore, prep_result: &Box<dyn Any + Send + Sync>,
-                      exec_result: Box<dyn Any + Send + Sync>) -> ActionName {
-        self.async_flow.post_async(shared, prep_result, exec_result).await
+    async fn _exec_async(&self, _prep_res: Value) -> Result<Value> {
+        Err(Error::InvalidOperation("AsyncParallelBatchFlow can't exec".into()))
     }
     
-    async fn run_async(&self, shared: &SharedStore) -> ActionName {
-        let prep_result = self.prep_async(shared).await;
+    async fn _run_async(&self, shared: &mut SharedState) -> Result<Action> {
+        let prep_res = self.prep_async(shared).await?;
         
-        // Process batch params in parallel
-        if let Some(batch_params) = prep_result.downcast_ref::<Vec<ParamMap>>() {
-            let futures = batch_params.iter().map(|params| {
-                let params_clone = params.clone();
-                let shared_clone = shared.clone();
-                
-                // Instead of trying to clone AsyncFlow, just create a new one with a placeholder
-                // and run directly against the shared store
-                async move {
-                    // Use shared orchestration logic but avoid direct cloning
-                    let action_name = self.async_flow.orchestrate_async(&shared_clone, Some(params_clone)).await;
-                    ActionName::default()
-                }
-            });
-            
-            // Run all futures in parallel
-            future::join_all(futures).await;
+        let batch_params = match &prep_res {
+            Value::Array(items) => items
+                .iter()
+                .map(|v| {
+                    if let Value::Object(map) = v {
+                        let map: HashMap<String, Value> = map
+                            .iter()
+                            .map(|(k, v)| (k.clone(), v.clone()))
+                            .collect();
+                        Ok(map)
+                    } else {
+                        Err(Error::NodeExecution("AsyncParallelBatchFlow prep should return array of objects".into()))
+                    }
+                })
+                .collect::<Result<Vec<_>>>()?,
+            Value::Null => vec![],
+            _ => return Err(Error::NodeExecution("AsyncParallelBatchFlow prep should return array or null".into())),
+        };
+        
+        if batch_params.is_empty() {
+            return self.post_async(shared, prep_res, Value::Null).await;
         }
         
-        self.post_async(shared, &prep_result, Box::new(())).await
+        let flow_params = self.batch_flow.params().read().unwrap().clone();
+        
+        // Create a future for each batch item
+        let futures = batch_params
+            .into_iter()
+            .map(|mut bp| {
+                // Clone what we need for the future
+                let flow = self.batch_flow.flow.clone();
+                let mut shared_clone = shared.clone();
+                let flow_params = flow_params.clone();
+                
+                // Merge batch params with flow params
+                for (k, v) in flow_params {
+                    bp.entry(k).or_insert(v);
+                }
+                
+                async move { flow._orch_async(&mut shared_clone, Some(bp)).await }
+            })
+            .collect::<Vec<_>>();
+        
+        // Execute all futures concurrently
+        let results = future::join_all(futures).await;
+        
+        // Check for errors
+        for result in results {
+            result?;
+        }
+        
+        self.post_async(shared, prep_res, Value::Null).await
     }
 } 

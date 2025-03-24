@@ -1,234 +1,89 @@
-use std::any::Any;
 use std::collections::HashMap;
-use std::sync::Arc;
-use std::fmt;
-use std::time::Duration;
+use std::sync::{Arc, RwLock};
 use std::thread;
-use async_trait::async_trait;
-use parking_lot::RwLock;
+use std::time::Duration;
+use serde_json::Value;
+use log::warn;
 
-use crate::error::{ActionName, MinLLMError, Result};
-use crate::store::SharedStore;
+use crate::base::{BaseNode, Node as NodeTrait};
+use crate::error::{Error, Result};
 
-// Generic type for parameters
-pub type ParamMap = HashMap<String, serde_json::Value>;
-
-// Node trait definition - this is now object safe for trait objects
-#[async_trait]
-pub trait Node: Send + Sync {
-    /// Prepare phase - gathers data from the shared store
-    fn prep(&self, shared: &SharedStore) -> Box<dyn Any + Send + Sync>;
-    
-    /// Execute phase - performs the main computation
-    fn exec(&self, prep_result: &Box<dyn Any + Send + Sync>) -> Box<dyn Any + Send + Sync>;
-    
-    /// Post phase - stores results and returns the next action
-    fn post(&self, shared: &SharedStore, prep_result: &Box<dyn Any + Send + Sync>, 
-            exec_result: Box<dyn Any + Send + Sync>) -> ActionName;
-    
-    /// Set parameters for this node
-    fn set_params(&mut self, params: ParamMap);
-    
-    /// Get a successor node for a given action
-    fn get_successor(&self, action: &str) -> Option<&Box<dyn Node>>;
-    
-    /// Run the node (combines prep, exec, and post)
-    fn run(&self, shared: &SharedStore) -> ActionName {
-        let prep_result = self.prep(shared);
-        let exec_result = self._exec(&prep_result);
-        self.post(shared, &prep_result, exec_result)
-    }
-    
-    /// Internal execution method (overridden by derived nodes)
-    fn _exec(&self, prep_result: &Box<dyn Any + Send + Sync>) -> Box<dyn Any + Send + Sync> {
-        self.exec(prep_result)
-    }
-    
-    // Async versions
-    async fn prep_async(&self, shared: &SharedStore) -> Box<dyn Any + Send + Sync> {
-        self.prep(shared)
-    }
-    
-    async fn exec_async(&self, prep_result: &Box<dyn Any + Send + Sync>) -> Box<dyn Any + Send + Sync> {
-        self.exec(prep_result)
-    }
-    
-    async fn post_async(&self, shared: &SharedStore, prep_result: &Box<dyn Any + Send + Sync>,
-                       exec_result: Box<dyn Any + Send + Sync>) -> ActionName {
-        self.post(shared, prep_result, exec_result)
-    }
-    
-    async fn run_async(&self, shared: &SharedStore) -> ActionName {
-        let prep_result = self.prep_async(shared).await;
-        let exec_result = self._exec_async(&prep_result).await;
-        self.post_async(shared, &prep_result, exec_result).await
-    }
-    
-    async fn _exec_async(&self, prep_result: &Box<dyn Any + Send + Sync>) -> Box<dyn Any + Send + Sync> {
-        self.exec_async(prep_result).await
-    }
-    
-    /// Get the node as Any for downcasting
-    fn as_any(&self) -> &dyn Any;
-}
-
-// Extension trait for mutable operations that can't be part of trait objects
-pub trait NodeMut: Node {
-    /// Add a successor node for a given action
-    fn add_successor(&mut self, node: Box<dyn Node>, action: impl Into<ActionName>) -> &mut Self;
-}
-
-// Base implementation for all nodes
-pub struct BaseNode {
-    pub(crate) params: ParamMap,
-    pub(crate) successors: HashMap<String, Box<dyn Node>>,
-}
-
-impl BaseNode {
-    pub fn new() -> Self {
-        Self {
-            params: HashMap::new(),
-            successors: HashMap::new(),
-        }
-    }
-}
-
-impl Default for BaseNode {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl Clone for BaseNode {
-    fn clone(&self) -> Self {
-        // We can't actually clone the successors since Box<dyn Node> doesn't implement Clone
-        // This will only be used when a new node is created with shared base data
-        Self {
-            params: self.params.clone(),
-            successors: HashMap::new(),
-        }
-    }
-}
-
-#[async_trait]
-impl Node for BaseNode {
-    fn set_params(&mut self, params: ParamMap) {
-        self.params = params;
-    }
-    
-    fn get_successor(&self, action: &str) -> Option<&Box<dyn Node>> {
-        self.successors.get(action)
-    }
-    
-    fn prep(&self, _shared: &SharedStore) -> Box<dyn Any + Send + Sync> {
-        Box::new(())
-    }
-    
-    fn exec(&self, _prep_result: &Box<dyn Any + Send + Sync>) -> Box<dyn Any + Send + Sync> {
-        Box::new(())
-    }
-    
-    fn post(&self, _shared: &SharedStore, _prep_result: &Box<dyn Any + Send + Sync>, 
-            _exec_result: Box<dyn Any + Send + Sync>) -> ActionName {
-        ActionName::default()
-    }
-    
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-}
-
-impl NodeMut for BaseNode {
-    fn add_successor(&mut self, node: Box<dyn Node>, action: impl Into<ActionName>) -> &mut Self {
-        let action_name = action.into();
-        if self.successors.contains_key(&action_name.0) {
-            eprintln!("Warning: Overwriting successor for action '{}'", action_name);
-        }
-        self.successors.insert(action_name.0, node);
-        self
-    }
-}
-
-// Regular Node with retry capabilities
-pub struct RegularNode {
+/// A node with retry capability
+#[derive(Clone)]
+pub struct Node {
+    /// The base node implementation
     base: BaseNode,
+    
+    /// Maximum number of retries
     max_retries: usize,
+    
+    /// Wait time between retries in milliseconds
     wait: u64,
-    current_retry: usize,
+    
+    /// Current retry count
+    cur_retry: Arc<RwLock<usize>>,
 }
 
-impl Clone for RegularNode {
-    fn clone(&self) -> Self {
-        Self {
-            base: self.base.clone(),
-            max_retries: self.max_retries,
-            wait: self.wait,
-            current_retry: 0, // Reset the current retry count when cloning
-        }
-    }
-}
-
-impl RegularNode {
+impl Node {
+    /// Create a new node with retry capability
     pub fn new(max_retries: usize, wait: u64) -> Self {
         Self {
             base: BaseNode::new(),
             max_retries,
             wait,
-            current_retry: 0,
+            cur_retry: Arc::new(RwLock::new(0)),
         }
     }
     
-    pub fn exec_fallback(&self, _prep_result: &Box<dyn Any + Send + Sync>, exc: Box<dyn std::error::Error + Send + Sync>) 
-        -> Box<dyn Any + Send + Sync> {
-        // Default implementation just re-raises the exception
-        panic!("Node execution failed after {} retries: {:?}", self.max_retries, exc);
+    /// Called on execution failure, can be overridden
+    pub fn exec_fallback(&self, _prep_res: Value, error: Error) -> Result<Value> {
+        Err(error)
     }
 }
 
-#[async_trait]
-impl Node for RegularNode {
-    fn set_params(&mut self, params: ParamMap) {
-        self.base.set_params(params);
+impl Default for Node {
+    fn default() -> Self {
+        Self::new(1, 0)
+    }
+}
+
+impl NodeTrait for Node {
+    fn params(&self) -> Arc<RwLock<HashMap<String, Value>>> {
+        self.base.params()
     }
     
-    fn get_successor(&self, action: &str) -> Option<&Box<dyn Node>> {
-        self.base.get_successor(action)
+    fn successors(&self) -> Arc<RwLock<HashMap<String, Arc<dyn NodeTrait>>>> {
+        self.base.successors()
     }
     
-    fn prep(&self, shared: &SharedStore) -> Box<dyn Any + Send + Sync> {
-        self.base.prep(shared)
+    fn set_params(&self, params: HashMap<String, Value>) {
+        let params_lock = self.params();
+        let mut p = params_lock.write().unwrap();
+        *p = params;
     }
     
-    fn exec(&self, prep_result: &Box<dyn Any + Send + Sync>) -> Box<dyn Any + Send + Sync> {
-        self.base.exec(prep_result)
+    fn add_successor(&self, node: Arc<dyn NodeTrait>, action: &str) -> Result<Arc<dyn NodeTrait>> {
+        let successors_lock = self.successors();
+        let mut successors = successors_lock.write().unwrap();
+        if successors.contains_key(action) {
+            warn!("Overwriting successor for action '{}'", action);
+        }
+        successors.insert(action.to_string(), node.clone());
+        Ok(node)
     }
     
-    fn post(&self, shared: &SharedStore, prep_result: &Box<dyn Any + Send + Sync>, 
-            exec_result: Box<dyn Any + Send + Sync>) -> ActionName {
-        self.base.post(shared, prep_result, exec_result)
-    }
-    
-    fn _exec(&self, prep_result: &Box<dyn Any + Send + Sync>) -> Box<dyn Any + Send + Sync> {
-        let mut retry_count = 0;
-        
-        loop {
-            match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                self.exec(prep_result)
-            })) {
-                Ok(result) => return result,
-                Err(err) => {
-                    retry_count += 1;
-                    if retry_count >= self.max_retries {
-                        let error = if let Some(e) = err.downcast_ref::<&dyn std::error::Error>() {
-                            format!("{}", e)
-                        } else if let Some(s) = err.downcast_ref::<&str>() {
-                            s.to_string()
-                        } else {
-                            "Unknown error".to_string()
-                        };
-                        
-                        let boxed_error = Box::new(MinLLMError::NodeError(error)) as Box<dyn std::error::Error + Send + Sync>;
-                        return self.exec_fallback(prep_result, boxed_error);
+    fn _exec(&self, prep_res: Value) -> Result<Value> {
+        for retry in 0..self.max_retries {
+            {
+                let mut cur_retry = self.cur_retry.write().unwrap();
+                *cur_retry = retry;
+            }
+            
+            match self.exec(prep_res.clone()) {
+                Ok(res) => return Ok(res),
+                Err(e) => {
+                    if retry == self.max_retries - 1 {
+                        return self.exec_fallback(prep_res, e);
                     }
                     
                     if self.wait > 0 {
@@ -237,79 +92,70 @@ impl Node for RegularNode {
                 }
             }
         }
-    }
-    
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-}
-
-impl NodeMut for RegularNode {
-    fn add_successor(&mut self, node: Box<dyn Node>, action: impl Into<ActionName>) -> &mut Self {
-        self.base.add_successor(node, action);
-        self
+        
+        // This should never happen if max_retries > 0
+        Err(Error::NodeExecution("Max retries exceeded".into()))
     }
 }
 
-// BatchNode for processing batches of items
+/// A node that processes batches of items
+#[derive(Clone)]
 pub struct BatchNode {
-    node: RegularNode,
-}
-
-impl Clone for BatchNode {
-    fn clone(&self) -> Self {
-        Self {
-            node: self.node.clone(),
-        }
-    }
+    /// The underlying node
+    node: Node,
 }
 
 impl BatchNode {
+    /// Create a new batch node
     pub fn new(max_retries: usize, wait: u64) -> Self {
         Self {
-            node: RegularNode::new(max_retries, wait),
+            node: Node::new(max_retries, wait),
         }
     }
 }
 
-#[async_trait]
-impl Node for BatchNode {
-    fn set_params(&mut self, params: ParamMap) {
-        self.node.set_params(params);
-    }
-    
-    fn get_successor(&self, action: &str) -> Option<&Box<dyn Node>> {
-        self.node.get_successor(action)
-    }
-    
-    fn prep(&self, shared: &SharedStore) -> Box<dyn Any + Send + Sync> {
-        self.node.prep(shared)
-    }
-    
-    fn exec(&self, prep_result: &Box<dyn Any + Send + Sync>) -> Box<dyn Any + Send + Sync> {
-        self.node.exec(prep_result)
-    }
-    
-    fn post(&self, shared: &SharedStore, prep_result: &Box<dyn Any + Send + Sync>, 
-            exec_result: Box<dyn Any + Send + Sync>) -> ActionName {
-        self.node.post(shared, prep_result, exec_result)
-    }
-    
-    fn _exec(&self, prep_result: &Box<dyn Any + Send + Sync>) -> Box<dyn Any + Send + Sync> {
-        // Try to process as batch, but we'll need a different approach here
-        // Since we can't actually clone Box<dyn Any>, we need to use
-        // a different approach in actual implementations
-        self.node._exec(prep_result)
-    }
-    
-    fn as_any(&self) -> &dyn Any {
-        self
+impl Default for BatchNode {
+    fn default() -> Self {
+        Self::new(1, 0)
     }
 }
 
-impl NodeMut for BatchNode {
-    fn add_successor(&mut self, node: Box<dyn Node>, action: impl Into<ActionName>) -> &mut Self {
-        self.node.add_successor(node, action);
-        self
+impl NodeTrait for BatchNode {
+    fn params(&self) -> Arc<RwLock<HashMap<String, Value>>> {
+        self.node.params()
+    }
+    
+    fn successors(&self) -> Arc<RwLock<HashMap<String, Arc<dyn NodeTrait>>>> {
+        self.node.successors()
+    }
+    
+    fn set_params(&self, params: HashMap<String, Value>) {
+        self.node.set_params(params);
+    }
+    
+    fn add_successor(&self, node: Arc<dyn NodeTrait>, action: &str) -> Result<Arc<dyn NodeTrait>> {
+        self.node.add_successor(node, action)
+    }
+    
+    fn _exec(&self, items: Value) -> Result<Value> {
+        // Handle empty batches
+        if items.is_null() {
+            return Ok(Value::Array(vec![]));
+        }
+        
+        // Ensure we have an array
+        let items = match items {
+            Value::Array(items) => items,
+            _ => return Err(Error::NodeExecution("BatchNode requires an array".into())),
+        };
+        
+        // Process each item using the node's exec method
+        let mut results = Vec::with_capacity(items.len());
+        for item in items {
+            let result = self.node._exec(item)?;
+            results.push(result);
+        }
+        
+        Ok(Value::Array(results))
     }
 } 

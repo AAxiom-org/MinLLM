@@ -1,128 +1,204 @@
-# MinLLM-rs
+# MinLLM
 
-A Rust implementation of MinLLM with Python bindings, providing a fast, efficient framework for building LLM-based applications.
+A workflow orchestration library implemented in Rust with Python bindings.
 
-## Overview
+This library provides tools for building and executing workflow pipelines with synchronous and asynchronous execution patterns.
 
-MinLLM is a minimalist framework for building complex applications using large language models. This implementation rebuilds the original Python package in Rust, providing significant performance improvements while maintaining the exact same Python API.
+## Features
 
-Key features:
-- **Identical Python API** - Drop-in replacement for the original MinLLM package
-- **Performance Improvements** - Significantly faster execution for CPU-bound tasks
-- **True Parallelism** - Overcome Python's GIL limitations
-- **Type Safety** - Catch errors at compile time rather than runtime
-- **Memory Safety** - Without garbage collection overhead
+- Build workflow pipelines using composable nodes
+- Synchronous and asynchronous execution
+- Batch processing
+- Parallel execution for batch operations
+- Error handling with retry logic
+- Conditional transitions between nodes
 
 ## Installation
+
+### From PyPI
 
 ```bash
 pip install minllm
 ```
 
-## Usage
+### From Source
 
-The API is identical to the original MinLLM Python package:
-
-```python
-from minllm import Node, Flow, SharedStore
-
-class InputNode(Node):
-    def prep(self, shared):
-        return "Hello World!"
-        
-    def exec(self, prep_res):
-        return prep_res.upper()
-        
-    def post(self, shared, prep_res, exec_res):
-        shared.set("result", exec_res)
-        return "default"
-
-class OutputNode(Node):
-    def prep(self, shared):
-        return shared.get("result")
-        
-    def exec(self, prep_res):
-        print(f"Result: {prep_res}")
-        return prep_res
-        
-    def post(self, shared, prep_res, exec_res):
-        return "default"
-
-# Create and run a flow
-flow = Flow(InputNode() >> OutputNode())
-shared = SharedStore()
-flow.run(shared)
+```bash
+git clone https://github.com/yourusername/minllm
+cd minllm
+pip install maturin
+maturin develop
 ```
 
-### Async Support
+## Usage
+
+### Basic Example
+
+```python
+from minllm import Node, Flow
+
+# Define nodes
+class FirstNode(Node):
+    def prep(self, shared):
+        print("FirstNode: prep")
+        return {"data": shared.get("initial_data", "default")}
+    
+    def exec(self, prep_res):
+        print(f"FirstNode: exec with {prep_res}")
+        return prep_res["data"].upper()
+    
+    def post(self, shared, prep_res, exec_res):
+        print(f"FirstNode: post with result {exec_res}")
+        shared["first_result"] = exec_res
+        return "default"  # action to determine next node
+
+class SecondNode(Node):
+    def prep(self, shared):
+        print("SecondNode: prep")
+        return {"prev_result": shared.get("first_result", "")}
+    
+    def exec(self, prep_res):
+        print(f"SecondNode: exec with {prep_res}")
+        return f"Processed: {prep_res['prev_result']}"
+    
+    def post(self, shared, prep_res, exec_res):
+        print(f"SecondNode: post with result {exec_res}")
+        shared["final_result"] = exec_res
+        return None  # end of flow
+
+# Create flow
+first = FirstNode()
+second = SecondNode()
+flow = Flow(first)
+
+# Connect nodes
+first >> second
+
+# Run flow
+shared_data = {"initial_data": "hello world"}
+flow.run(shared_data)
+print(f"Final result: {shared_data['final_result']}")
+```
+
+### Asynchronous Example
 
 ```python
 import asyncio
-from minllm import AsyncNode, AsyncFlow, SharedStore
+from minllm import AsyncNode, AsyncFlow
 
-class AsyncInputNode(AsyncNode):
+class AsyncFirstNode(AsyncNode):
     async def prep_async(self, shared):
-        await asyncio.sleep(1)  # Async operation
-        return "Hello World!"
-        
+        print("AsyncFirstNode: prep")
+        return {"data": shared.get("initial_data", "default")}
+    
     async def exec_async(self, prep_res):
-        await asyncio.sleep(1)  # Async operation
-        return prep_res.upper()
-        
+        print(f"AsyncFirstNode: exec with {prep_res}")
+        await asyncio.sleep(0.1)  # Simulate async work
+        return prep_res["data"].upper()
+    
     async def post_async(self, shared, prep_res, exec_res):
-        shared.set("result", exec_res)
-        return "default"
+        print(f"AsyncFirstNode: post with result {exec_res}")
+        shared["first_result"] = exec_res
+        return "default"  # action to determine next node
 
-# Create and run an async flow
-flow = AsyncFlow(AsyncInputNode() >> AsyncOutputNode())
-shared = SharedStore()
-asyncio.run(flow.run_async(shared))
+class AsyncSecondNode(AsyncNode):
+    async def prep_async(self, shared):
+        print("AsyncSecondNode: prep")
+        return {"prev_result": shared.get("first_result", "")}
+    
+    async def exec_async(self, prep_res):
+        print(f"AsyncSecondNode: exec with {prep_res}")
+        await asyncio.sleep(0.1)  # Simulate async work
+        return f"Processed: {prep_res['prev_result']}"
+    
+    async def post_async(self, shared, prep_res, exec_res):
+        print(f"AsyncSecondNode: post with result {exec_res}")
+        shared["final_result"] = exec_res
+        return None  # end of flow
+
+# Create flow
+first = AsyncFirstNode()
+second = AsyncSecondNode()
+flow = AsyncFlow(first)
+
+# Connect nodes
+first >> second
+
+# Run flow
+async def main():
+    shared_data = {"initial_data": "hello async world"}
+    await flow.run_async(shared_data)
+    print(f"Final result: {shared_data['final_result']}")
+
+asyncio.run(main())
+```
+
+### Conditional Transitions
+
+```python
+# Connect nodes with conditional transitions
+first - "success" >> success_node
+first - "error" >> error_node
 ```
 
 ### Batch Processing
 
 ```python
-from minllm import BatchNode, BatchFlow, SharedStore
+from minllm import BatchNode, BatchFlow
 
-class InputBatchNode(BatchNode):
-    def prep(self, shared):
-        # Return a list of parameter dicts to be processed
-        return [{'item': 'apple'}, {'item': 'banana'}, {'item': 'grape'}]
+class BatchProcessor(BatchNode):
+    def exec(self, items):
+        return [item.upper() for item in items]
 
-# Create and run a batch flow
-flow = BatchFlow(InputBatchNode() >> ProcessNode())
-shared = SharedStore()
-flow.run(shared)
+# Create batch flow
+batch_node = BatchProcessor()
+flow = BatchFlow(batch_node)
+
+# Run batch flow
+shared_data = {"items": ["item1", "item2", "item3"]}
+flow.run(shared_data)
 ```
 
-## Core Components
+## Rust Usage
 
-- **Node**: Basic building block for computation
-- **Flow**: Orchestrates the execution of nodes
-- **SharedStore**: Shared key-value store for communication between nodes
-- **BatchNode/BatchFlow**: Process batches of items
-- **AsyncNode/AsyncFlow**: Support for asynchronous operations
+This library can also be used directly from Rust:
 
-## Examples
+```rust
+use minllm::{BaseNode, Node, Flow};
+use std::collections::HashMap;
+use std::sync::Arc;
+use serde_json::Value;
 
-See the `examples/python` directory for more detailed examples.
+struct MyNode {
+    node: Node,
+}
 
-## Building from Source
+impl MyNode {
+    fn new() -> Self {
+        Self {
+            node: Node::new(1, 0),
+        }
+    }
+}
 
-To build the package from source, you'll need Rust and Python development tools:
+impl RustNodeTrait for MyNode {
+    // Implement required trait methods
+}
 
-```bash
-# Clone the repository
-git clone https://github.com/username/MinLLM-rs
-cd MinLLM-rs
-
-# Build the package
-maturin develop
-
-# Run tests
-cargo test
+fn main() {
+    let first = Arc::new(MyNode::new());
+    let second = Arc::new(MyNode::new());
+    
+    let flow = Flow::new(first.clone());
+    first.add_successor(second, "default").unwrap();
+    
+    let mut shared = HashMap::new();
+    shared.insert("initial_data".to_string(), Value::String("hello".to_string()));
+    
+    flow.run(&mut shared).unwrap();
+}
 ```
 
 ## License
 
-MIT 
+MIT License 
