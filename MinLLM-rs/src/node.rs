@@ -319,4 +319,3 @@ impl NodeMut for BatchNode {
         self
     }
 } 
-} 
