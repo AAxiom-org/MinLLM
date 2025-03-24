@@ -5,7 +5,7 @@ edition = "2021"
 authors = ["Aidan"]
 description = "MinLLM - A minimalist LLM framework implemented in Rust with Python bindings"
 license = "MIT"
-repository = "https://github.com/username/MinLLM-rs"
+repository = "https://github.com/AAxiom-org/MinLLM"
 
 [lib]
 name = "minllm"
