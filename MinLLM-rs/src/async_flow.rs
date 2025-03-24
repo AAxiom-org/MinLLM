@@ -30,13 +30,13 @@ impl AsyncFlow {
         // Try to get the successor for the specific action
         if let Some(next) = current.get_successor(&action_name) {
             // Clone the next node
-            return Some(clone_box(next));
+            return Some(deep_clone_node(next));
         }
         
         // If not found and action is not default, try default
         if action_name != default_action {
             if let Some(next) = current.get_successor(&default_action) {
-                return Some(clone_box(next));
+                return Some(deep_clone_node(next));
             }
         }
         
@@ -91,11 +91,11 @@ impl Node for AsyncFlow {
         panic!("Use prep_async instead for AsyncFlow");
     }
     
-    fn exec(&self, _prep_result: Box<dyn Any + Send + Sync>) -> Box<dyn Any + Send + Sync> {
+    fn exec(&self, _prep_result: &Box<dyn Any + Send + Sync>) -> Box<dyn Any + Send + Sync> {
         panic!("AsyncFlow cannot exec directly. Use run_async() instead.");
     }
     
-    fn post(&self, _shared: &SharedStore, _prep_result: Box<dyn Any + Send + Sync>, 
+    fn post(&self, _shared: &SharedStore, _prep_result: &Box<dyn Any + Send + Sync>, 
            _exec_result: Box<dyn Any + Send + Sync>) -> ActionName {
         panic!("Use post_async instead for AsyncFlow");
     }
@@ -114,11 +114,11 @@ impl AsyncNode for AsyncFlow {
         Box::new(())
     }
     
-    async fn exec_async(&self, _prep_result: Box<dyn Any + Send + Sync>) -> Box<dyn Any + Send + Sync> {
+    async fn exec_async(&self, _prep_result: &Box<dyn Any + Send + Sync>) -> Box<dyn Any + Send + Sync> {
         panic!("AsyncFlow cannot exec_async directly. Use run_async() instead.");
     }
     
-    async fn post_async(&self, _shared: &SharedStore, _prep_result: Box<dyn Any + Send + Sync>,
+    async fn post_async(&self, _shared: &SharedStore, _prep_result: &Box<dyn Any + Send + Sync>,
                       _exec_result: Box<dyn Any + Send + Sync>) -> ActionName {
         ActionName::default()
     }
@@ -126,7 +126,7 @@ impl AsyncNode for AsyncFlow {
     async fn run_async(&self, shared: &SharedStore) -> ActionName {
         let prep_result = self.prep_async(shared).await;
         self.orchestrate_async(shared, None).await;
-        self.post_async(shared, prep_result, Box::new(())).await
+        self.post_async(shared, &prep_result, Box::new(())).await
     }
 }
 
@@ -162,11 +162,11 @@ impl Node for AsyncBatchFlow {
         panic!("Use prep_async instead for AsyncBatchFlow");
     }
     
-    fn exec(&self, _prep_result: Box<dyn Any + Send + Sync>) -> Box<dyn Any + Send + Sync> {
+    fn exec(&self, _prep_result: &Box<dyn Any + Send + Sync>) -> Box<dyn Any + Send + Sync> {
         panic!("AsyncBatchFlow cannot exec directly. Use run_async() instead.");
     }
     
-    fn post(&self, _shared: &SharedStore, _prep_result: Box<dyn Any + Send + Sync>, 
+    fn post(&self, _shared: &SharedStore, _prep_result: &Box<dyn Any + Send + Sync>, 
            _exec_result: Box<dyn Any + Send + Sync>) -> ActionName {
         panic!("Use post_async instead for AsyncBatchFlow");
     }
@@ -189,11 +189,11 @@ impl AsyncNode for AsyncBatchFlow {
         self.async_flow.prep_async(shared).await
     }
     
-    async fn exec_async(&self, _prep_result: Box<dyn Any + Send + Sync>) -> Box<dyn Any + Send + Sync> {
+    async fn exec_async(&self, _prep_result: &Box<dyn Any + Send + Sync>) -> Box<dyn Any + Send + Sync> {
         panic!("AsyncBatchFlow cannot exec_async directly. Use run_async() instead.");
     }
     
-    async fn post_async(&self, shared: &SharedStore, prep_result: Box<dyn Any + Send + Sync>,
+    async fn post_async(&self, shared: &SharedStore, prep_result: &Box<dyn Any + Send + Sync>,
                       exec_result: Box<dyn Any + Send + Sync>) -> ActionName {
         self.async_flow.post_async(shared, prep_result, exec_result).await
     }
@@ -208,7 +208,7 @@ impl AsyncNode for AsyncBatchFlow {
             }
         }
         
-        self.post_async(shared, prep_result, Box::new(())).await
+        self.post_async(shared, &prep_result, Box::new(())).await
     }
 }
 
@@ -244,11 +244,11 @@ impl Node for AsyncParallelBatchFlow {
         panic!("Use prep_async instead for AsyncParallelBatchFlow");
     }
     
-    fn exec(&self, _prep_result: Box<dyn Any + Send + Sync>) -> Box<dyn Any + Send + Sync> {
+    fn exec(&self, _prep_result: &Box<dyn Any + Send + Sync>) -> Box<dyn Any + Send + Sync> {
         panic!("AsyncParallelBatchFlow cannot exec directly. Use run_async() instead.");
     }
     
-    fn post(&self, _shared: &SharedStore, _prep_result: Box<dyn Any + Send + Sync>, 
+    fn post(&self, _shared: &SharedStore, _prep_result: &Box<dyn Any + Send + Sync>, 
            _exec_result: Box<dyn Any + Send + Sync>) -> ActionName {
         panic!("Use post_async instead for AsyncParallelBatchFlow");
     }
@@ -271,11 +271,11 @@ impl AsyncNode for AsyncParallelBatchFlow {
         self.async_flow.prep_async(shared).await
     }
     
-    async fn exec_async(&self, _prep_result: Box<dyn Any + Send + Sync>) -> Box<dyn Any + Send + Sync> {
+    async fn exec_async(&self, _prep_result: &Box<dyn Any + Send + Sync>) -> Box<dyn Any + Send + Sync> {
         panic!("AsyncParallelBatchFlow cannot exec_async directly. Use run_async() instead.");
     }
     
-    async fn post_async(&self, shared: &SharedStore, prep_result: Box<dyn Any + Send + Sync>,
+    async fn post_async(&self, shared: &SharedStore, prep_result: &Box<dyn Any + Send + Sync>,
                       exec_result: Box<dyn Any + Send + Sync>) -> ActionName {
         self.async_flow.post_async(shared, prep_result, exec_result).await
     }
@@ -288,10 +288,12 @@ impl AsyncNode for AsyncParallelBatchFlow {
             let futures = batch_params.iter().map(|params| {
                 let params_clone = params.clone();
                 let shared_clone = shared.clone();
-                let self_clone = self.async_flow.clone();
                 
+                // Instead of trying to clone AsyncFlow, just create a new one with a placeholder
+                // and run directly against the shared store
                 async move {
-                    self_clone.orchestrate_async(&shared_clone, Some(params_clone)).await;
+                    // Use shared orchestration logic but avoid direct cloning
+                    let action_name = self.async_flow.orchestrate_async(&shared_clone, Some(params_clone)).await;
                     ActionName::default()
                 }
             });
@@ -300,6 +302,6 @@ impl AsyncNode for AsyncParallelBatchFlow {
             future::join_all(futures).await;
         }
         
-        self.post_async(shared, prep_result, Box::new(())).await
+        self.post_async(shared, &prep_result, Box::new(())).await
     }
 } 

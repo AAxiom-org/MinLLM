@@ -286,16 +286,16 @@ impl Node for BatchNode {
         self.node.prep(shared)
     }
     
-    fn exec(&self, prep_result: Box<dyn Any + Send + Sync>) -> Box<dyn Any + Send + Sync> {
+    fn exec(&self, prep_result: &Box<dyn Any + Send + Sync>) -> Box<dyn Any + Send + Sync> {
         self.node.exec(prep_result)
     }
     
-    fn post(&self, shared: &SharedStore, prep_result: Box<dyn Any + Send + Sync>, 
+    fn post(&self, shared: &SharedStore, prep_result: &Box<dyn Any + Send + Sync>, 
             exec_result: Box<dyn Any + Send + Sync>) -> ActionName {
-        self.node.post(shared, &prep_result, exec_result)
+        self.node.post(shared, prep_result, exec_result)
     }
     
-    fn _exec(&self, prep_result: Box<dyn Any + Send + Sync>) -> Box<dyn Any + Send + Sync> {
+    fn _exec(&self, prep_result: &Box<dyn Any + Send + Sync>) -> Box<dyn Any + Send + Sync> {
         // Try to process as batch, but we'll need a different approach here
         // Since we can't actually clone Box<dyn Any>, we need to use
         // a different approach in actual implementations

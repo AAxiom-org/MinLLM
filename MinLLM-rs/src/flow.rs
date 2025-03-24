@@ -120,11 +120,11 @@ impl Node for Flow {
         self.base.prep(shared)
     }
     
-    fn exec(&self, _prep_result: Box<dyn Any + Send + Sync>) -> Box<dyn Any + Send + Sync> {
+    fn exec(&self, _prep_result: &Box<dyn Any + Send + Sync>) -> Box<dyn Any + Send + Sync> {
         panic!("Flow cannot exec directly. Use run() instead.");
     }
     
-    fn post(&self, shared: &SharedStore, prep_result: Box<dyn Any + Send + Sync>, 
+    fn post(&self, shared: &SharedStore, prep_result: &Box<dyn Any + Send + Sync>, 
             exec_result: Box<dyn Any + Send + Sync>) -> ActionName {
         self.base.post(shared, prep_result, exec_result)
     }
@@ -176,11 +176,11 @@ impl Node for BatchFlow {
         self.flow.prep(shared)
     }
     
-    fn exec(&self, _prep_result: Box<dyn Any + Send + Sync>) -> Box<dyn Any + Send + Sync> {
+    fn exec(&self, _prep_result: &Box<dyn Any + Send + Sync>) -> Box<dyn Any + Send + Sync> {
         panic!("BatchFlow cannot exec directly. Use run() instead.");
     }
     
-    fn post(&self, shared: &SharedStore, prep_result: Box<dyn Any + Send + Sync>, 
+    fn post(&self, shared: &SharedStore, prep_result: &Box<dyn Any + Send + Sync>, 
             exec_result: Box<dyn Any + Send + Sync>) -> ActionName {
         self.flow.post(shared, prep_result, exec_result)
     }
