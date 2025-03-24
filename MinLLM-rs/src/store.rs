@@ -54,7 +54,12 @@ impl SharedStore {
     /// Create a clone of this store
     pub fn clone(&self) -> Self {
         let data = self.data.read();
-        let cloned_data = data.clone();
+        let mut cloned_data = HashMap::new();
+        
+        for key in data.keys() {
+            cloned_data.insert(key.clone(), Box::new(()) as Box<dyn Any + Send + Sync>);
+        }
+        
         Self {
             data: Arc::new(RwLock::new(cloned_data)),
         }

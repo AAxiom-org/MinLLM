@@ -20,10 +20,10 @@ pub trait Node: Send + Sync {
     fn prep(&self, shared: &SharedStore) -> Box<dyn Any + Send + Sync>;
     
     /// Execute phase - performs the main computation
-    fn exec(&self, prep_result: Box<dyn Any + Send + Sync>) -> Box<dyn Any + Send + Sync>;
+    fn exec(&self, prep_result: &Box<dyn Any + Send + Sync>) -> Box<dyn Any + Send + Sync>;
     
     /// Post phase - stores results and returns the next action
-    fn post(&self, shared: &SharedStore, prep_result: Box<dyn Any + Send + Sync>, 
+    fn post(&self, shared: &SharedStore, prep_result: &Box<dyn Any + Send + Sync>, 
             exec_result: Box<dyn Any + Send + Sync>) -> ActionName;
     
     /// Set parameters for this node
@@ -35,12 +35,12 @@ pub trait Node: Send + Sync {
     /// Run the node (combines prep, exec, and post)
     fn run(&self, shared: &SharedStore) -> ActionName {
         let prep_result = self.prep(shared);
-        let exec_result = self._exec(prep_result);
-        self.post(shared, prep_result, exec_result)
+        let exec_result = self._exec(&prep_result);
+        self.post(shared, &prep_result, exec_result)
     }
     
     /// Internal execution method (overridden by derived nodes)
-    fn _exec(&self, prep_result: Box<dyn Any + Send + Sync>) -> Box<dyn Any + Send + Sync> {
+    fn _exec(&self, prep_result: &Box<dyn Any + Send + Sync>) -> Box<dyn Any + Send + Sync> {
         self.exec(prep_result)
     }
     
@@ -49,22 +49,22 @@ pub trait Node: Send + Sync {
         self.prep(shared)
     }
     
-    async fn exec_async(&self, prep_result: Box<dyn Any + Send + Sync>) -> Box<dyn Any + Send + Sync> {
+    async fn exec_async(&self, prep_result: &Box<dyn Any + Send + Sync>) -> Box<dyn Any + Send + Sync> {
         self.exec(prep_result)
     }
     
-    async fn post_async(&self, shared: &SharedStore, prep_result: Box<dyn Any + Send + Sync>,
+    async fn post_async(&self, shared: &SharedStore, prep_result: &Box<dyn Any + Send + Sync>,
                        exec_result: Box<dyn Any + Send + Sync>) -> ActionName {
         self.post(shared, prep_result, exec_result)
     }
     
     async fn run_async(&self, shared: &SharedStore) -> ActionName {
         let prep_result = self.prep_async(shared).await;
-        let exec_result = self._exec_async(prep_result).await;
-        self.post_async(shared, prep_result, exec_result).await
+        let exec_result = self._exec_async(&prep_result).await;
+        self.post_async(shared, &prep_result, exec_result).await
     }
     
-    async fn _exec_async(&self, prep_result: Box<dyn Any + Send + Sync>) -> Box<dyn Any + Send + Sync> {
+    async fn _exec_async(&self, prep_result: &Box<dyn Any + Send + Sync>) -> Box<dyn Any + Send + Sync> {
         self.exec_async(prep_result).await
     }
     
@@ -124,11 +124,11 @@ impl Node for BaseNode {
         Box::new(())
     }
     
-    fn exec(&self, _prep_result: Box<dyn Any + Send + Sync>) -> Box<dyn Any + Send + Sync> {
+    fn exec(&self, _prep_result: &Box<dyn Any + Send + Sync>) -> Box<dyn Any + Send + Sync> {
         Box::new(())
     }
     
-    fn post(&self, _shared: &SharedStore, _prep_result: Box<dyn Any + Send + Sync>, 
+    fn post(&self, _shared: &SharedStore, _prep_result: &Box<dyn Any + Send + Sync>, 
             _exec_result: Box<dyn Any + Send + Sync>) -> ActionName {
         ActionName::default()
     }
@@ -178,7 +178,7 @@ impl RegularNode {
         }
     }
     
-    pub fn exec_fallback(&self, _prep_result: Box<dyn Any + Send + Sync>, exc: Box<dyn std::error::Error + Send + Sync>) 
+    pub fn exec_fallback(&self, _prep_result: &Box<dyn Any + Send + Sync>, exc: Box<dyn std::error::Error + Send + Sync>) 
         -> Box<dyn Any + Send + Sync> {
         // Default implementation just re-raises the exception
         panic!("Node execution failed after {} retries: {:?}", self.max_retries, exc);
@@ -199,18 +199,17 @@ impl Node for RegularNode {
         self.base.prep(shared)
     }
     
-    fn exec(&self, prep_result: Box<dyn Any + Send + Sync>) -> Box<dyn Any + Send + Sync> {
+    fn exec(&self, prep_result: &Box<dyn Any + Send + Sync>) -> Box<dyn Any + Send + Sync> {
         self.base.exec(prep_result)
     }
     
-    fn post(&self, shared: &SharedStore, prep_result: Box<dyn Any + Send + Sync>, 
+    fn post(&self, shared: &SharedStore, prep_result: &Box<dyn Any + Send + Sync>, 
             exec_result: Box<dyn Any + Send + Sync>) -> ActionName {
         self.base.post(shared, prep_result, exec_result)
     }
     
-    fn _exec(&self, prep_result: Box<dyn Any + Send + Sync>) -> Box<dyn Any + Send + Sync> {
+    fn _exec(&self, prep_result: &Box<dyn Any + Send + Sync>) -> Box<dyn Any + Send + Sync> {
         let mut retry_count = 0;
-        let mut prep_result = prep_result;
         
         loop {
             match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -235,11 +234,6 @@ impl Node for RegularNode {
                     if self.wait > 0 {
                         thread::sleep(Duration::from_millis(self.wait));
                     }
-                    
-                    // Create a fresh copy of prep_result for the next iteration
-                    // Since Box<dyn Any> doesn't implement Clone, we have to handle
-                    // this case carefully in actual implementations
-                    prep_result = Box::new(()); // Placeholder
                 }
             }
         }
@@ -298,7 +292,7 @@ impl Node for BatchNode {
     
     fn post(&self, shared: &SharedStore, prep_result: Box<dyn Any + Send + Sync>, 
             exec_result: Box<dyn Any + Send + Sync>) -> ActionName {
-        self.node.post(shared, prep_result, exec_result)
+        self.node.post(shared, &prep_result, exec_result)
     }
     
     fn _exec(&self, prep_result: Box<dyn Any + Send + Sync>) -> Box<dyn Any + Send + Sync> {

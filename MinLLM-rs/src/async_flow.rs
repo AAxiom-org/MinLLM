@@ -4,9 +4,9 @@ use async_trait::async_trait;
 use futures::future;
 
 use crate::error::{ActionName, MinLLMError, Result};
-use crate::node::{Node, BaseNode, ParamMap};
+use crate::node::{Node, NodeMut, BaseNode, ParamMap};
 use crate::store::SharedStore;
-use crate::flow::{Flow, BatchFlow, AsyncNode, clone_box};
+use crate::flow::{Flow, BatchFlow, AsyncNode};
 
 /// AsyncFlow orchestrates async nodes
 pub struct AsyncFlow {
@@ -66,13 +66,16 @@ impl AsyncFlow {
             current = self.get_next_node(&*node, &action.0);
         }
     }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
 }
 
 #[async_trait]
 impl Node for AsyncFlow {
     fn set_params(&mut self, params: ParamMap) {
-        self.flow.set_params(params.clone());
-        self.async_base.set_params(params);
+        self.flow.set_params(params);
     }
     
     fn add_successor(&mut self, node: Box<dyn Node>, action: impl Into<ActionName>) -> &mut Self {
@@ -95,6 +98,13 @@ impl Node for AsyncFlow {
     fn post(&self, _shared: &SharedStore, _prep_result: Box<dyn Any + Send + Sync>, 
            _exec_result: Box<dyn Any + Send + Sync>) -> ActionName {
         panic!("Use post_async instead for AsyncFlow");
+    }
+}
+
+impl NodeMut for AsyncFlow {
+    fn add_successor(&mut self, node: Box<dyn Node>, action: impl Into<ActionName>) -> &mut Self {
+        self.flow.add_successor(node, action);
+        self
     }
 }
 
@@ -159,6 +169,17 @@ impl Node for AsyncBatchFlow {
     fn post(&self, _shared: &SharedStore, _prep_result: Box<dyn Any + Send + Sync>, 
            _exec_result: Box<dyn Any + Send + Sync>) -> ActionName {
         panic!("Use post_async instead for AsyncBatchFlow");
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
+impl NodeMut for AsyncBatchFlow {
+    fn add_successor(&mut self, node: Box<dyn Node>, action: impl Into<ActionName>) -> &mut Self {
+        self.async_flow.add_successor(node, action);
+        self
     }
 }
 
@@ -230,6 +251,17 @@ impl Node for AsyncParallelBatchFlow {
     fn post(&self, _shared: &SharedStore, _prep_result: Box<dyn Any + Send + Sync>, 
            _exec_result: Box<dyn Any + Send + Sync>) -> ActionName {
         panic!("Use post_async instead for AsyncParallelBatchFlow");
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
+impl NodeMut for AsyncParallelBatchFlow {
+    fn add_successor(&mut self, node: Box<dyn Node>, action: impl Into<ActionName>) -> &mut Self {
+        self.async_flow.add_successor(node, action);
+        self
     }
 }
 

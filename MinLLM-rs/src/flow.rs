@@ -214,8 +214,8 @@ impl NodeMut for BatchFlow {
 #[async_trait]
 pub trait AsyncNode: Node {
     async fn prep_async(&self, shared: &SharedStore) -> Box<dyn Any + Send + Sync>;
-    async fn exec_async(&self, prep_result: Box<dyn Any + Send + Sync>) -> Box<dyn Any + Send + Sync>;
-    async fn post_async(&self, shared: &SharedStore, prep_result: Box<dyn Any + Send + Sync>,
+    async fn exec_async(&self, prep_result: &Box<dyn Any + Send + Sync>) -> Box<dyn Any + Send + Sync>;
+    async fn post_async(&self, shared: &SharedStore, prep_result: &Box<dyn Any + Send + Sync>,
                        exec_result: Box<dyn Any + Send + Sync>) -> ActionName;
     async fn run_async(&self, shared: &SharedStore) -> ActionName;
 }
@@ -224,13 +224,18 @@ pub trait AsyncNode: Node {
 /// This is a placeholder implementation - in a real system, you'd need a proper
 /// factory pattern or other mechanism to clone trait objects
 pub fn deep_clone_node(node: &Box<dyn Node>) -> Box<dyn Node> {
-    // In actual implementation, we'd check the concrete type and clone appropriately
-    // For now, since our actual nodes will use an immutable pattern, or be cloned
-    // by Python, we'll just return a placeholder node for the Rust implementation
+    // Since Box<dyn Node> doesn't implement Clone, we create a placeholder
     new_placeholder_node()
 }
 
-// Helper to create a placeholder node
+// Adding this clone_box function that was referenced but missing
+pub fn clone_box<T: 'static + Clone>(boxed: &Box<dyn Any + Send + Sync>) -> Option<T> {
+    match boxed.downcast_ref::<T>() {
+        Some(value) => Some(value.clone()),
+        None => None,
+    }
+}
+
 fn new_placeholder_node() -> Box<dyn Node> {
     Box::new(BaseNode::new())
 } 
